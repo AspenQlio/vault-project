@@ -2,6 +2,7 @@ from fastapi import FastAPI, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import create_engine, Column, Integer, String
 from sqlalchemy.orm import sessionmaker, Session, declarative_base
+from typing import Union
 
 SQLALCHEMY_DATABASE_URL = "sqlite:///./vault.db"
 engine = create_engine(SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False})
@@ -21,6 +22,15 @@ class CredentialDB(Base):
     nonce_hex = Column(String)
     encrypted_data_hex = Column(String)
 
+class Credencial(Base):
+    __tablename__ = "credenciales"
+    id = Column(Integer, primary_key=True, index=True)
+    id_usuario = Column(Integer, index=True)
+    sitio = Column(String, index=True)
+    usuario_crypto = Column(String)
+    pass_crypto = Column(String)
+    nonce = Column(String)
+
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="Vault Backend API")
@@ -33,6 +43,13 @@ class VaultPayload(BaseModel):
     user_id: str
     nonce_hex: str
     encrypted_data_hex: str
+
+class CredencialSync(BaseModel):
+    id_usuario: int
+    sitio: str
+    usuario_hex: str
+    datos_cifrados_hex: str
+    nonce_hex: str
 
 # New: update-only payload (does not need the user_id in the body)
 class UpdatePayload(BaseModel):
@@ -64,7 +81,31 @@ def login_user(payload: AuthPayload, db: Session = Depends(get_db)):
     return {"status": "success", "message": "Authenticated"}
 
 @app.post("/api/sync")
-def sync_vault(payload: VaultPayload, db: Session = Depends(get_db)):
+def sync_vault(payload: Union[VaultPayload, CredencialSync], db: Session = Depends(get_db)):
+    if isinstance(payload, CredencialSync):
+        credencial_existente = db.query(Credencial).filter(
+            Credencial.id_usuario == payload.id_usuario,
+            Credencial.sitio == payload.sitio,
+        ).first()
+
+        if credencial_existente:
+            credencial_existente.usuario_crypto = payload.usuario_hex
+            credencial_existente.pass_crypto = payload.datos_cifrados_hex
+            credencial_existente.nonce = payload.nonce_hex
+            db.commit()
+            return {"mensaje": "Credencial actualizada en la nube", "estado": "actualizado"}
+
+        nueva_credencial = Credencial(
+            id_usuario=payload.id_usuario,
+            sitio=payload.sitio,
+            usuario_crypto=payload.usuario_hex,
+            pass_crypto=payload.datos_cifrados_hex,
+            nonce=payload.nonce_hex,
+        )
+        db.add(nueva_credencial)
+        db.commit()
+        return {"mensaje": "Credencial sincronizada correctamente", "estado": "creado"}
+
     new_credential = CredentialDB(
         user_id=payload.user_id, nonce_hex=payload.nonce_hex, encrypted_data_hex=payload.encrypted_data_hex
     )

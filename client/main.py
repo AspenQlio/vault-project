@@ -10,7 +10,7 @@ import string
 import sqlite3
 
 # Server URL for the backend API
-SERVER_URL = "http://127.0.0.1:8000"
+SERVER_URL = "https://api-vault-cfd6.onrender.com"
 
 def load_crypto_core():
     # Load the C cryptographic library (libvault_crypto.so) using ctypes
@@ -32,6 +32,10 @@ class VaultApp(ctk.CTk):
         self.title("Vault - Zero Knowledge (Hybrid Architecture)")
         self.geometry("950x600")
         self.minsize(850, 500)
+
+        self.icon_font = ("JetBrainsMono Nerd Font", 14)
+        self.icon_title_font = ("JetBrainsMono Nerd Font", 24, "bold")
+        self.icon_button_font = ("JetBrainsMono Nerd Font", 13)
         
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
@@ -81,7 +85,7 @@ class VaultApp(ctk.CTk):
         login_frame = ctk.CTkFrame(self, fg_color="transparent")
         login_frame.grid(row=0, column=0)
         
-        ctk.CTkLabel(login_frame, text="", font=("Roboto", 60)).pack(pady=(0, 10))
+        ctk.CTkLabel(login_frame, text="󰌾", font=self.icon_title_font).pack(pady=(0, 10))
         ctk.CTkLabel(login_frame, text="Vault Authentication", font=("Roboto", 24, "bold")).pack(pady=(0, 30))
         
         self.entry_user = ctk.CTkEntry(login_frame, placeholder_text="Username", width=350, height=45)
@@ -145,14 +149,16 @@ class VaultApp(ctk.CTk):
         
         self.sidebar = ctk.CTkFrame(self, width=220, corner_radius=0)
         self.sidebar.grid(row=0, column=0, sticky="nsew")
-        self.sidebar.grid_rowconfigure(4, weight=1)
+        self.sidebar.grid_rowconfigure(7, weight=1)
         
-        ctk.CTkLabel(self.sidebar, text=" Vault", font=("Roboto", 24, "bold")).grid(row=0, column=0, padx=20, pady=(30, 5), sticky="w")
+        ctk.CTkLabel(self.sidebar, text="󰌾 Vault", font=self.icon_title_font).grid(row=0, column=0, padx=20, pady=(30, 5), sticky="w")
         ctk.CTkLabel(self.sidebar, text=f" {self.current_user}", font=("Roboto", 12), text_color="gray").grid(row=1, column=0, padx=20, pady=(0, 30), sticky="w")
         
-        ctk.CTkButton(self.sidebar, text=" All Accounts", anchor="w", fg_color="transparent", command=self.show_list_view).grid(row=2, column=0, padx=10, pady=5, sticky="ew")
-        ctk.CTkButton(self.sidebar, text=" Add Item", anchor="w", fg_color="transparent", command=self.show_form_view).grid(row=3, column=0, padx=10, pady=5, sticky="ew")
-        ctk.CTkButton(self.sidebar, text=" Logout", fg_color="#3b3b3b", hover_color="#ff4a4a", command=self.show_welcome_screen).grid(row=5, column=0, padx=20, pady=30, sticky="ew")
+        ctk.CTkButton(self.sidebar, text=" All Accounts", anchor="w", fg_color="transparent", font=self.icon_button_font, command=self.show_list_view).grid(row=2, column=0, padx=10, pady=5, sticky="ew")
+        ctk.CTkButton(self.sidebar, text="󰈀 Local Passwords", anchor="w", fg_color="transparent", font=self.icon_button_font, command=self.show_local_view).grid(row=3, column=0, padx=10, pady=5, sticky="ew")
+        ctk.CTkButton(self.sidebar, text=" Add Item", anchor="w", fg_color="transparent", font=self.icon_button_font, command=self.show_form_view).grid(row=4, column=0, padx=10, pady=5, sticky="ew")
+        ctk.CTkButton(self.sidebar, text=" Sync Now", anchor="w", fg_color="transparent", font=self.icon_button_font, command=self.sync_to_cloud).grid(row=5, column=0, padx=10, pady=5, sticky="ew")
+        ctk.CTkButton(self.sidebar, text=" Exit", fg_color="#3b3b3b", hover_color="#ff4a4a", font=self.icon_button_font, command=self.exit_app).grid(row=6, column=0, padx=20, pady=30, sticky="ew")
 
         self.central_panel = ctk.CTkFrame(self, corner_radius=0, fg_color="transparent")
         self.central_panel.grid(row=0, column=1, sticky="nsew", padx=30, pady=30)
@@ -166,20 +172,97 @@ class VaultApp(ctk.CTk):
         for widget in self.central_panel.winfo_children():
             widget.destroy()
 
+    def sync_to_cloud(self):
+        def show_feedback(message, color=None, title="Vault"):
+            if hasattr(self, "lbl_status"):
+                self.lbl_status.configure(text=message, text_color=color or "white")
+            elif color == "#ff4a4a":
+                messagebox.showerror(title, message)
+            else:
+                messagebox.showinfo(title, message)
+
+        try:
+            connection = sqlite3.connect("vault_local.db")
+            cursor = connection.cursor()
+            cursor.execute(
+                "SELECT id, nonce_hex, encrypted_data_hex FROM local_credentials WHERE user_id = ?",
+                (self.current_user,),
+            )
+            rows = cursor.fetchall()
+            connection.close()
+
+            if not rows:
+                show_feedback("No local items to sync.", "gray")
+                return
+
+            synced_count = 0
+            for db_id, nonce_hex, encrypted_data_hex in rows:
+                item_label = f"item #{db_id}"
+                try:
+                    nonce = bytes.fromhex(nonce_hex)
+                    encrypted_bytes = bytes.fromhex(encrypted_data_hex)
+                    plain_length = len(encrypted_bytes) - 16
+                    if plain_length > 0:
+                        decrypted_buffer = ctypes.create_string_buffer(plain_length + 1)
+                        if self.core.descifrar_credencial(encrypted_bytes, len(encrypted_bytes), nonce, self.symmetric_key, decrypted_buffer) == 0:
+                            data_dict = json.loads(decrypted_buffer.value.decode("utf-8"))
+                            service_name = data_dict.get("service")
+                            if service_name:
+                                item_label = service_name
+                except Exception:
+                    pass
+
+                payload = {
+                    "user_id": self.current_user,
+                    "nonce_hex": nonce_hex,
+                    "encrypted_data_hex": encrypted_data_hex,
+                }
+                response = requests.post(f"{SERVER_URL}/api/sync", json=payload, timeout=3)
+                if response.status_code in (200, 201):
+                    synced_count += 1
+                    print(f"Synced: {item_label}")
+                else:
+                    detail = ""
+                    try:
+                        detail = response.json().get("detail", "")
+                    except Exception:
+                        detail = response.text.strip()
+                    print(f"Failed to sync {item_label}: {detail or 'Unknown error'}")
+
+            show_feedback(f" Sync complete: {synced_count}/{len(rows)} item(s) uploaded.", "#5cacee")
+            self.after(1000, self.show_list_view)
+        except requests.exceptions.ConnectionError:
+            show_feedback("Network error.", "#ff4a4a")
+        except Exception as e:
+            show_feedback("Sync failed.", "#ff4a4a")
+            print(f"Error syncing to cloud: {e}")
+
     def show_list_view(self):
+        self._show_credentials_view(include_cloud=True, title_text="󰆼 Safe Box")
+
+    def show_local_view(self):
+        self._show_credentials_view(include_cloud=False, title_text="󰈀 Local Passwords")
+
+    def _show_credentials_view(self, include_cloud, title_text):
         self.clear_central_panel()
         header = ctk.CTkFrame(self.central_panel, fg_color="transparent")
         header.grid(row=0, column=0, sticky="ew", pady=(0, 20))
         header.grid_columnconfigure(0, weight=1)
         
-        ctk.CTkLabel(header, text="Safe Box", font=("Roboto", 28, "bold")).grid(row=0, column=0, sticky="w")
-        ctk.CTkButton(header, text=" Refresh", width=120, command=self.show_list_view).grid(row=0, column=1, sticky="e")
+        ctk.CTkLabel(header, text=title_text, font=self.icon_title_font).grid(row=0, column=0, sticky="w")
+        ctk.CTkButton(
+            header,
+            text=" Refresh",
+            width=120,
+            font=self.icon_button_font,
+            command=lambda: self._show_credentials_view(include_cloud=include_cloud, title_text=title_text),
+        ).grid(row=0, column=1, sticky="e")
         
         self.scroll_frame = ctk.CTkScrollableFrame(self.central_panel, fg_color="transparent")
         self.scroll_frame.grid(row=1, column=0, sticky="nsew")
-        self.load_and_decrypt_data()
+        self.load_and_decrypt_data(include_cloud=include_cloud)
 
-    def load_and_decrypt_data(self):
+    def load_and_decrypt_data(self, include_cloud=True):
         combined_list = []
 
         # Load local data
@@ -194,18 +277,19 @@ class VaultApp(ctk.CTk):
         except Exception:
             pass
 
-        # Fetch and load cloud data
-        try:
-            response = requests.get(f"{SERVER_URL}/api/sync/{self.current_user}", timeout=2)
-            if response.status_code == 200:
-                cloud_data = response.json().get("credentials", [])
-                for cred in cloud_data:
-                    combined_list.append({"id": cred["id"], "nonce_hex": cred["nonce_hex"], "encrypted_data_hex": cred["encrypted_data_hex"], "source": " Cloud"})
-        except requests.exceptions.ConnectionError:
-            ctk.CTkLabel(self.scroll_frame, text=" Offline Mode: Displaying local credentials only", text_color="#ffcc00").pack(pady=(0,10))
+        if include_cloud:
+            # Fetch and load cloud data
+            try:
+                response = requests.get(f"{SERVER_URL}/api/sync/{self.current_user}", timeout=2)
+                if response.status_code == 200:
+                    cloud_data = response.json().get("credentials", [])
+                    for cred in cloud_data:
+                        combined_list.append({"id": cred["id"], "nonce_hex": cred["nonce_hex"], "encrypted_data_hex": cred["encrypted_data_hex"], "source": " Cloud"})
+            except requests.exceptions.ConnectionError:
+                ctk.CTkLabel(self.scroll_frame, text=" Offline mode: displaying local credentials only", text_color="#ffcc00", font=self.icon_button_font).pack(pady=(0,10))
 
         if not combined_list:
-            ctk.CTkLabel(self.scroll_frame, text="Vault is empty.", text_color="gray").pack(pady=40)
+            ctk.CTkLabel(self.scroll_frame, text=" Vault is empty.", text_color="gray", font=self.icon_button_font).pack(pady=40)
             return
 
         for cred in combined_list:
@@ -226,7 +310,7 @@ class VaultApp(ctk.CTk):
                 except json.JSONDecodeError:
                     pass
             else:
-                ctk.CTkLabel(self.scroll_frame, text=" Decryption Error", text_color="#ff4a4a").pack(pady=10)
+                ctk.CTkLabel(self.scroll_frame, text=" Decryption error", text_color="#ff4a4a", font=self.icon_button_font).pack(pady=10)
 
     def create_credential_card(self, db_id, service, username, password, source):
         card = ctk.CTkFrame(self.scroll_frame, corner_radius=10, fg_color="#2b2b2b")
@@ -252,25 +336,25 @@ class VaultApp(ctk.CTk):
         def toggle():
             if entry_pwd.cget("show") == "*":
                 entry_pwd.configure(show="")
-                btn_show.configure(text=" Hide")
+                btn_show.configure(text=" Hide")
             else:
                 entry_pwd.configure(show="*")
-                btn_show.configure(text=" Show")
-                
-        btn_show = ctk.CTkButton(pwd_frame, text=" Show", width=80, fg_color="#3b3b3b", hover_color="#555555", command=toggle)
+                btn_show.configure(text=" Show")
+
+        btn_show = ctk.CTkButton(pwd_frame, text=" Show", width=80, fg_color="#3b3b3b", hover_color="#555555", font=self.icon_button_font, command=toggle)
         btn_show.pack(side="left", padx=(0, 5))
         
         def copy_to_clipboard():
             self.clipboard_clear()
             self.clipboard_append(password)
-            btn_copy.configure(text=" Copied", text_color="#4aff6b")
-            self.after(2000, lambda: btn_copy.configure(text=" Copy", text_color="white"))
+            btn_copy.configure(text=" Copied", text_color="#4aff6b")
+            self.after(2000, lambda: btn_copy.configure(text=" Copy", text_color="white"))
             
-        btn_copy = ctk.CTkButton(pwd_frame, text=" Copy", width=80, fg_color="#3b3b3b", hover_color="#555555", command=copy_to_clipboard)
+        btn_copy = ctk.CTkButton(pwd_frame, text=" Copy", width=80, fg_color="#3b3b3b", hover_color="#555555", font=self.icon_button_font, command=copy_to_clipboard)
         btn_copy.pack(side="left", padx=(0, 5))
 
         # Edit button for modifying existing credentials
-        btn_edit = ctk.CTkButton(pwd_frame, text=" Edit", width=80, fg_color="#3b3b3b", hover_color="#ffcc00", command=lambda: self.prepare_edit_view(db_id, service, username, password, source))
+        btn_edit = ctk.CTkButton(pwd_frame, text=" Edit", width=80, fg_color="#3b3b3b", hover_color="#ffcc00", font=self.icon_button_font, command=lambda: self.prepare_edit_view(db_id, service, username, password, source))
         btn_edit.pack(side="left", padx=(0, 5))
 
         def delete_item():
@@ -300,7 +384,7 @@ class VaultApp(ctk.CTk):
                 except Exception as e:
                     print(f"Error deleting from cloud: {e}")
 
-        btn_delete = ctk.CTkButton(pwd_frame, text=" Delete", width=80, fg_color="#3b3b3b", hover_color="#ff4a4a", command=delete_item)
+        btn_delete = ctk.CTkButton(pwd_frame, text=" Delete", width=80, fg_color="#3b3b3b", hover_color="#ff4a4a", font=self.icon_button_font, command=delete_item)
         btn_delete.pack(side="left")
 
     # ==========================================
@@ -308,7 +392,7 @@ class VaultApp(ctk.CTk):
     # ==========================================
     def show_form_view(self):
         self.clear_central_panel()
-        ctk.CTkLabel(self.central_panel, text="Add Item", font=("Roboto", 28, "bold")).grid(row=0, column=0, sticky="w", pady=(0, 20))
+        ctk.CTkLabel(self.central_panel, text=" Add Item", font=self.icon_title_font).grid(row=0, column=0, sticky="w", pady=(0, 20))
         
         form_frame = ctk.CTkFrame(self.central_panel, corner_radius=10, fg_color="#2b2b2b")
         form_frame.grid(row=1, column=0, sticky="nsew")
@@ -329,21 +413,21 @@ class VaultApp(ctk.CTk):
         self.entry_pass = ctk.CTkEntry(pwd_container, width=340, height=40, show="*")
         self.entry_pass.pack(side="left", padx=(0, 10))
         
-        btn_gen = ctk.CTkButton(pwd_container, text=" Gen", width=70, height=40, fg_color="#3b3b3b", hover_color="#555555", command=self.generate_password)
+        btn_gen = ctk.CTkButton(pwd_container, text=" Gen", width=70, height=40, fg_color="#3b3b3b", hover_color="#555555", font=self.icon_button_font, command=self.generate_password)
         btn_gen.pack(side="left")
         
         self.switch_var = ctk.IntVar(value=0)
-        self.switch_cloud = ctk.CTkSwitch(form_frame, text=" Sync to Cloud (Off = Local Save)", variable=self.switch_var, font=("Roboto", 13))
+        self.switch_cloud = ctk.CTkSwitch(form_frame, text=" Sync to Cloud (Off = Local Save)", variable=self.switch_var, font=self.icon_button_font)
         self.switch_cloud.pack(anchor="w", padx=30, pady=(20, 10))
         
         self.lbl_status = ctk.CTkLabel(form_frame, text="", font=("Roboto", 14))
         self.lbl_status.pack(anchor="w", padx=30, pady=5)
         
-        ctk.CTkButton(form_frame, text="Save to Vault", height=45, width=200, command=self.save_data).pack(anchor="w", padx=30, pady=(0, 30))
+        ctk.CTkButton(form_frame, text=" Save to Vault", height=45, width=200, font=self.icon_button_font, command=self.save_data).pack(anchor="w", padx=30, pady=(0, 30))
 
     def prepare_edit_view(self, db_id, service, username, password, source):
         self.clear_central_panel()
-        ctk.CTkLabel(self.central_panel, text="Edit Item", font=("Roboto", 28, "bold")).grid(row=0, column=0, sticky="w", pady=(0, 20))
+        ctk.CTkLabel(self.central_panel, text=" Edit Item", font=self.icon_title_font).grid(row=0, column=0, sticky="w", pady=(0, 20))
 
         form_frame = ctk.CTkFrame(self.central_panel, corner_radius=10, fg_color="#2b2b2b")
         form_frame.grid(row=1, column=0, sticky="nsew")
@@ -367,11 +451,11 @@ class VaultApp(ctk.CTk):
         self.entry_pass.insert(0, password)
         self.entry_pass.pack(side="left", padx=(0, 10))
 
-        btn_gen = ctk.CTkButton(pwd_container, text=" Gen", width=70, height=40, fg_color="#3b3b3b", hover_color="#555555", command=self.generate_password)
+        btn_gen = ctk.CTkButton(pwd_container, text=" Gen", width=70, height=40, fg_color="#3b3b3b", hover_color="#555555", font=self.icon_button_font, command=self.generate_password)
         btn_gen.pack(side="left")
 
         # Prevent storage location change during edit to maintain data consistency
-        ctk.CTkLabel(form_frame, text=f" Storage: {source} (immutable during edit)", font=("Roboto", 12), text_color="gray").pack(anchor="w", padx=30, pady=(20, 0))
+        ctk.CTkLabel(form_frame, text=f"󰆳 Storage: {source} (immutable during edit)", font=self.icon_button_font, text_color="gray").pack(anchor="w", padx=30, pady=(20, 0))
 
         self.lbl_status = ctk.CTkLabel(form_frame, text="", font=("Roboto", 14))
         self.lbl_status.pack(anchor="w", padx=30, pady=5)
@@ -379,8 +463,8 @@ class VaultApp(ctk.CTk):
         buttons_frame = ctk.CTkFrame(form_frame, fg_color="transparent")
         buttons_frame.pack(anchor="w", padx=30, pady=(0, 30))
 
-        ctk.CTkButton(buttons_frame, text=" Save Changes", height=45, width=170, command=lambda: self.update_data(db_id, source)).pack(side="left", padx=(0, 10))
-        ctk.CTkButton(buttons_frame, text=" Cancel", height=45, width=100, fg_color="#3b3b3b", hover_color="#555555", command=self.show_list_view).pack(side="left")
+        ctk.CTkButton(buttons_frame, text=" Save Changes", height=45, width=170, font=self.icon_button_font, command=lambda: self.update_data(db_id, source)).pack(side="left", padx=(0, 10))
+        ctk.CTkButton(buttons_frame, text=" Cancel", height=45, width=100, fg_color="#3b3b3b", hover_color="#555555", font=self.icon_button_font, command=self.show_list_view).pack(side="left")
 
     def generate_password(self):
         # Generate cryptographically secure 16-character password with mixed character types
@@ -416,7 +500,7 @@ class VaultApp(ctk.CTk):
                 cursor.execute("INSERT INTO local_credentials (user_id, nonce_hex, encrypted_data_hex) VALUES (?, ?, ?)",(self.current_user, nonce.hex(), buffer.raw.hex()))
                 connection.commit()
                 connection.close()
-                self.lbl_status.configure(text=" Saved Locally", text_color="#4aff6b")
+                self.lbl_status.configure(text=" Saved locally", text_color="#4aff6b")
                 self.after(1000, self.show_list_view)
             except Exception as e:
                 self.lbl_status.configure(text="Error saving to disk.", text_color="#ff4a4a")
@@ -425,7 +509,7 @@ class VaultApp(ctk.CTk):
             try:
                 res = requests.post(f"{SERVER_URL}/api/sync", json={"user_id": self.current_user, "nonce_hex": nonce.hex(), "encrypted_data_hex": buffer.raw.hex()}, timeout=3)
                 if res.status_code == 200:
-                    self.lbl_status.configure(text=" Synced to Cloud", text_color="#5cacee")
+                    self.lbl_status.configure(text=" Synced to cloud", text_color="#5cacee")
                     self.after(1000, self.show_list_view)
             except requests.exceptions.ConnectionError:
                 self.lbl_status.configure(text="Network error.", text_color="#ff4a4a")
@@ -455,7 +539,7 @@ class VaultApp(ctk.CTk):
                 cursor.execute("UPDATE local_credentials SET nonce_hex = ?, encrypted_data_hex = ? WHERE id = ?", (nonce.hex(), buffer.raw.hex(), db_id))
                 connection.commit()
                 connection.close()
-                self.lbl_status.configure(text=" Updated Locally", text_color="#4aff6b")
+                self.lbl_status.configure(text=" Updated locally", text_color="#4aff6b")
                 self.after(1000, self.show_list_view)
             except Exception as e:
                 self.lbl_status.configure(text="Error updating.", text_color="#ff4a4a")
@@ -463,10 +547,13 @@ class VaultApp(ctk.CTk):
             try:
                 res = requests.put(f"{SERVER_URL}/api/sync/{self.current_user}/{db_id}", json={"nonce_hex": nonce.hex(), "encrypted_data_hex": buffer.raw.hex()}, timeout=3)
                 if res.status_code == 200:
-                    self.lbl_status.configure(text=" Updated in Cloud", text_color="#5cacee")
+                    self.lbl_status.configure(text=" Updated in cloud", text_color="#5cacee")
                     self.after(1000, self.show_list_view)
             except requests.exceptions.ConnectionError:
                 self.lbl_status.configure(text="Network error.", text_color="#ff4a4a")
+
+    def exit_app(self):
+        self.destroy()
 
 if __name__ == "__main__":
     app = VaultApp()
