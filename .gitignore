@@ -1,0 +1,18 @@
+# Entorno Virtual
+venv/
+.venv/
+
+# Bases de datos locales (¡CRUCIAL!)
+*.db
+*.sqlite3
+
+# Caché de Python
+__pycache__/
+*.pyc
+
+# Compilados de C
+core_crypto/libvault_crypto.so
+*.o
+
+# VS Code
+.vscode/
