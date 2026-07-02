@@ -83,17 +83,17 @@ def login_user(payload: AuthPayload, db: Session = Depends(get_db)):
 @app.post("/api/sync")
 def sync_vault(payload: Union[VaultPayload, CredencialSync], db: Session = Depends(get_db)):
     if isinstance(payload, CredencialSync):
-        credencial_existente = db.query(Credencial).filter(
+        existente = db.query(Credencial).filter(
             Credencial.id_usuario == payload.id_usuario,
             Credencial.sitio == payload.sitio,
         ).first()
 
-        if credencial_existente:
-            credencial_existente.usuario_crypto = payload.usuario_hex
-            credencial_existente.pass_crypto = payload.datos_cifrados_hex
-            credencial_existente.nonce = payload.nonce_hex
+        if existente:
+            existente.usuario_crypto = payload.usuario_hex
+            existente.pass_crypto = payload.datos_cifrados_hex
+            existente.nonce = payload.nonce_hex
             db.commit()
-            return {"mensaje": "Credencial actualizada en la nube", "estado": "actualizado"}
+            return {"mensaje": "Actualizado", "estado": "ok"}
 
         nueva_credencial = Credencial(
             id_usuario=payload.id_usuario,
@@ -104,7 +104,7 @@ def sync_vault(payload: Union[VaultPayload, CredencialSync], db: Session = Depen
         )
         db.add(nueva_credencial)
         db.commit()
-        return {"mensaje": "Credencial sincronizada correctamente", "estado": "creado"}
+        return {"mensaje": "Creado", "estado": "ok"}
 
     new_credential = CredentialDB(
         user_id=payload.user_id, nonce_hex=payload.nonce_hex, encrypted_data_hex=payload.encrypted_data_hex
