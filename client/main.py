@@ -12,21 +12,92 @@ import sqlite3
 # Server URL for the backend API
 SERVER_URL = "https://api-vault-cfd6.onrender.com"
 
-def sincronizar_con_nube(id_usuario, db_path="vault_local.db", server_url=SERVER_URL, interactive=False):
-    print("\nStarting cloud sync...")
+def automatic_cloud_download(username, user_id, db_path="vault_local.db", server_url=SERVER_URL):
+    """Fetches passwords from the cloud via Render and injects locally only those that are missing."""
+    print(f"\n Downloading cloud credentials for user: {username}...")
+    
+    try:
+        # Make the GET request to the server endpoint
+        response = requests.get(f"{server_url}/api/sync/{username}", timeout=5)
+        
+        if response.status_code == 200:
+            payload = response.json()
+            cloud_credentials = payload.get("credentials", payload if isinstance(payload, list) else [])
+            
+            if not cloud_credentials:
+                print("󰆧 You don't have any passwords saved in the cloud yet.")
+                return
+            
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+            
+            new_downloads = 0
+            
+            for cred in cloud_credentials:
+                # Extract encrypted data
+                site = cred.get("sitio")
+                crypto_user = cred.get("usuario_hex") or cred.get("usuario_crypto")
+                crypto_pass = cred.get("datos_cifrados_hex") or cred.get("pass_crypto") or cred.get("encrypted_data_hex")
+                nonce = cred.get("nonce_hex") or cred.get("nonce")
+                
+                # CRITICAL RULE: Check if it already exists LOCALLY for this user and site
+                # This prevents overwriting local passwords that were intentionally kept offline
+                if not site: # Cannot check for existence without a site
+                    continue
+
+                cursor.execute("""
+                    SELECT id FROM local_credentials 
+                    WHERE user_id = ? AND sitio = ?
+                """, (user_id, site))
+                
+                local_exists = cursor.fetchone()
+                
+                if not local_exists:
+                    # If it doesn't exist on the current PC, insert it directly with 'Cloud' status
+                    cursor.execute("""
+                        INSERT INTO local_credentials (user_id, sitio, usuario_crypto, pass_crypto, nonce_hex, encrypted_data_hex, estado)
+                        VALUES (?, ?, ?, ?, ?, ?, 'Cloud')
+                    """, (user_id, site, crypto_user or "", crypto_pass, nonce, crypto_pass))
+                    new_downloads += 1
+            
+            conn.commit()
+            conn.close()
+            
+            if new_downloads > 0:
+                print(f" Sync complete! Downloaded {new_downloads} passwords from the cloud.")
+            else:
+                print(" Everything is up to date. No new passwords in the cloud.")
+                
+        else:
+            print(f" Could not connect to the cloud to download (Code: {response.status_code}) - {response.text}")
+            
+    except Exception as e:
+        print(f" Error during automatic download: {e}")
+
+def sync_with_cloud(user_id, db_path="vault_local.db", server_url=SERVER_URL, interactive=False):
+    print("\n Starting cloud sync...")
 
     def sync_local_credentials(cursor, connection, rows, selected_ids=None):
         synced_count = 0
         total_count = 0
 
-        for record_id, nonce_hex, encrypted_data_hex in rows:
+        for row in rows:
+            record_id = row[0]
+            nonce_hex = row[1]
+            encrypted_data_hex = row[2]
+            status = row[3] if len(row) > 3 else None
+
+            if status == "Cloud":
+                print(f"󰒭 Skipping cloud-synced local record #{record_id}")
+                continue
+
             if selected_ids is not None and record_id not in selected_ids:
-                print(f"Skipping record #{record_id}")
+                print(f"󰒭 Skipping record #{record_id}")
                 continue
 
             total_count += 1
             payload = {
-                "user_id": id_usuario,
+                "user_id": user_id,
                 "nonce_hex": nonce_hex,
                 "encrypted_data_hex": encrypted_data_hex,
             }
@@ -35,9 +106,9 @@ def sincronizar_con_nube(id_usuario, db_path="vault_local.db", server_url=SERVER
 
             if response.status_code in (200, 201):
                 synced_count += 1
-                print(f"Synced record #{record_id}")
+                print(f" Synced record #{record_id}")
             else:
-                print(f"Failed to sync record #{record_id}: {response.text}")
+                print(f" Failed to sync record #{record_id}: {response.text}")
 
         return synced_count, total_count
 
@@ -45,17 +116,17 @@ def sincronizar_con_nube(id_usuario, db_path="vault_local.db", server_url=SERVER
         synced_count = 0
         total_count = 0
 
-        for record_id, sitio, usuario_crypto, pass_crypto, nonce_hex in rows:
-            if selected_sites is not None and sitio not in selected_sites:
-                print(f"Skipping site '{sitio}'")
+        for record_id, site, crypto_user, crypto_pass, nonce_hex in rows:
+            if selected_sites is not None and site not in selected_sites:
+                print(f"󰒭 Skipping site '{site}'")
                 continue
 
             total_count += 1
             payload = {
-                "id_usuario": int(id_usuario) if str(id_usuario).isdigit() else id_usuario,
-                "sitio": sitio,
-                "usuario_hex": usuario_crypto,
-                "datos_cifrados_hex": pass_crypto,
+                "id_usuario": int(user_id) if str(user_id).isdigit() else user_id,
+                "sitio": site,
+                "usuario_hex": crypto_user,
+                "datos_cifrados_hex": crypto_pass,
                 "nonce_hex": nonce_hex,
             }
 
@@ -63,23 +134,23 @@ def sincronizar_con_nube(id_usuario, db_path="vault_local.db", server_url=SERVER
 
             if response.status_code in (200, 201):
                 synced_count += 1
-                print(f"Synced: {sitio}")
+                print(f" Synced: {site}")
                 if status_column == "estado":
                     cursor.execute("""
                         UPDATE credenciales 
                         SET estado = 'Cloud' 
                         WHERE id_usuario = ? AND sitio = ?
-                    """, (id_usuario, sitio))
+                    """, (user_id, site))
                     connection.commit()
                 elif status_column == "modo":
                     cursor.execute("""
                         UPDATE credenciales 
                         SET modo = 'Cloud' 
                         WHERE id_usuario = ? AND sitio = ?
-                    """, (id_usuario, sitio))
+                    """, (user_id, site))
                     connection.commit()
             else:
-                print(f"Failed to sync {sitio}: {response.text}")
+                print(f" Failed to sync {site}: {response.text}")
 
         return synced_count, total_count
 
@@ -94,7 +165,7 @@ def sincronizar_con_nube(id_usuario, db_path="vault_local.db", server_url=SERVER
         has_site_credentials = cursor.fetchone() is not None
 
         if not has_local_credentials and not has_site_credentials:
-            print("No compatible local credentials table found.")
+            print(" No compatible local credentials table found.")
             connection.close()
             return 0, 0
 
@@ -102,25 +173,31 @@ def sincronizar_con_nube(id_usuario, db_path="vault_local.db", server_url=SERVER
             cursor.execute("PRAGMA table_info(local_credentials)")
             local_columns = {row[1] for row in cursor.fetchall()}
 
-            cursor.execute(
-                "SELECT id, nonce_hex, encrypted_data_hex FROM local_credentials WHERE user_id = ?",
-                (id_usuario,),
-            )
+            if "estado" in local_columns:
+                cursor.execute(
+                    "SELECT id, nonce_hex, encrypted_data_hex, estado FROM local_credentials WHERE user_id = ?",
+                    (user_id,),
+                )
+            else:
+                cursor.execute(
+                    "SELECT id, nonce_hex, encrypted_data_hex FROM local_credentials WHERE user_id = ?",
+                    (user_id,),
+                )
             local_rows = cursor.fetchall()
 
             if not local_rows:
-                print("No local credentials to sync.")
+                print("󰆧 No local credentials to sync.")
                 connection.close()
                 return 0, 0
 
             if interactive:
-                print("\n--- SYNC MENU ---")
+                print("\n---  SYNC MENU ---")
                 print("1. Sync all local credentials to the cloud")
                 print("2. Select credentials manually")
                 print("3. Cancel")
                 option = input("Choose an option: ").strip()
                 if option == "3":
-                    print("Sync cancelled.")
+                    print(" Sync cancelled.")
                     connection.close()
                     return 0, 0
 
@@ -136,7 +213,7 @@ def sincronizar_con_nube(id_usuario, db_path="vault_local.db", server_url=SERVER
             else:
                 synced_count, total_count = sync_local_credentials(cursor, connection, local_rows)
 
-            print(f"Sync finished. {synced_count}/{total_count} credentials uploaded.")
+            print(f" Sync finished. {synced_count}/{total_count} credentials uploaded.")
             connection.close()
             return synced_count, total_count
 
@@ -149,13 +226,13 @@ def sincronizar_con_nube(id_usuario, db_path="vault_local.db", server_url=SERVER
             status_column = "modo"
 
         if interactive:
-            print("\n--- SYNC MENU ---")
+            print("\n---  SYNC MENU ---")
             print("1. Sync all local credentials to the cloud")
             print("2. Select credentials manually")
             print("3. Cancel")
             option = input("Choose an option: ").strip()
             if option == "3":
-                print("Sync cancelled.")
+                print(" Sync cancelled.")
                 connection.close()
                 return 0, 0
         else:
@@ -165,32 +242,32 @@ def sincronizar_con_nube(id_usuario, db_path="vault_local.db", server_url=SERVER
         if status_column is not None:
             query += f" AND ({status_column} = 'local' OR {status_column} IS NULL)"
 
-        cursor.execute(query, (id_usuario,))
+        cursor.execute(query, (user_id,))
         site_rows = cursor.fetchall()
 
         if not site_rows:
-            print("All credentials are already synced to the cloud.")
+            print(" All credentials are already synced to the cloud.")
             connection.close()
             return 0, 0
 
         if interactive and option == "2":
             selected_sites = set()
-            for _, sitio, _, _, _ in site_rows:
-                answer = input(f"Sync '{sitio}' to the cloud? (y/n): ").strip().lower()
+            for _, site, _, _, _ in site_rows:
+                answer = input(f"Sync '{site}' to the cloud? (y/n): ").strip().lower()
                 if answer in {"y", "yes", "s", "si"}:
-                    selected_sites.add(sitio)
+                    selected_sites.add(site)
             synced_count, total_count = sync_site_credentials(cursor, connection, site_rows, selected_sites, status_column)
         else:
             synced_count, total_count = sync_site_credentials(cursor, connection, site_rows, None, status_column)
 
-        print(f"Sync finished. {synced_count}/{total_count} credentials uploaded.")
+        print(f" Sync finished. {synced_count}/{total_count} credentials uploaded.")
         connection.close()
         return synced_count, total_count
 
     except requests.exceptions.ConnectionError:
         raise
     except Exception as e:
-        print(f"Error during sync: {e}")
+        print(f" Error during sync: {e}")
         return 0, 0
 
 def load_crypto_core():
@@ -223,7 +300,7 @@ class VaultApp(ctk.CTk):
         
         self.core = load_crypto_core()
         if self.core.inicializar_motor() < 0:
-            print("Fatal error with libsodium.")
+            print(" Fatal error with libsodium.")
             self.destroy()
             
         self.symmetric_key = None
@@ -244,6 +321,18 @@ class VaultApp(ctk.CTk):
                 encrypted_data_hex TEXT
             )
         ''')
+        cursor.execute("PRAGMA table_info(local_credentials)")
+        existing_columns = {row[1] for row in cursor.fetchall()}
+        
+        # Keep the exact Spanish SQL column names to prevent database corruption
+        for column_name, column_type in (
+            ("sitio", "TEXT"),
+            ("usuario_crypto", "TEXT"),
+            ("pass_crypto", "TEXT"),
+            ("estado", "TEXT"),
+        ):
+            if column_name not in existing_columns:
+                cursor.execute(f"ALTER TABLE local_credentials ADD COLUMN {column_name} {column_type}")
         connection.commit()
         connection.close()
 
@@ -314,6 +403,10 @@ class VaultApp(ctk.CTk):
             if res.status_code == 200:
                 self.current_user = username
                 self.symmetric_key = encryption_key
+                try:
+                    automatic_cloud_download(username, username)
+                except Exception as download_error:
+                    print(f"Automatic cloud download skipped: {download_error}")
                 self.show_main_screen()
             else:
                 self.lbl_error.configure(text="Invalid credentials.", text_color="#ff4a4a")
@@ -363,7 +456,7 @@ class VaultApp(ctk.CTk):
                 messagebox.showinfo(title, message)
 
         try:
-            synced_count, total_count = sincronizar_con_nube(self.current_user)
+            synced_count, total_count = sync_with_cloud(self.current_user)
             if total_count == 0:
                 show_feedback("No local items to sync.", "gray")
                 return
@@ -404,6 +497,7 @@ class VaultApp(ctk.CTk):
 
     def load_and_decrypt_data(self, include_cloud=True):
         combined_list = []
+        local_signatures = set()
 
         # Clear previous cards before redrawing the updated list
         for widget in self.scroll_frame.winfo_children():
@@ -413,10 +507,21 @@ class VaultApp(ctk.CTk):
         try:
             connection = sqlite3.connect("vault_local.db")
             cursor = connection.cursor()
-            cursor.execute("SELECT id, nonce_hex, encrypted_data_hex FROM local_credentials WHERE user_id = ?", (self.current_user,))
+            cursor.execute("PRAGMA table_info(local_credentials)")
+            local_columns = {row[1] for row in cursor.fetchall()}
+            if "estado" in local_columns:
+                cursor.execute(
+                    "SELECT id, nonce_hex, encrypted_data_hex, estado FROM local_credentials WHERE user_id = ?",
+                    (self.current_user,),
+                )
+            else:
+                cursor.execute("SELECT id, nonce_hex, encrypted_data_hex FROM local_credentials WHERE user_id = ?", (self.current_user,))
             rows = cursor.fetchall()
             for row in rows:
-                combined_list.append({"id": row[0], "nonce_hex": row[1], "encrypted_data_hex": row[2], "source": " Local"})
+                status = row[3] if len(row) > 3 else None
+                source = " Cloud" if status == "Cloud" else " Local"
+                local_signatures.add((row[1], row[2]))
+                combined_list.append({"id": row[0], "nonce_hex": row[1], "encrypted_data_hex": row[2], "source": source})
             connection.close()
         except Exception:
             pass
@@ -428,7 +533,11 @@ class VaultApp(ctk.CTk):
                 if response.status_code == 200:
                     cloud_data = response.json().get("credentials", [])
                     for cred in cloud_data:
-                        combined_list.append({"id": cred["id"], "nonce_hex": cred["nonce_hex"], "encrypted_data_hex": cred["encrypted_data_hex"], "source": " Cloud"})
+                        nonce_hex = cred.get("nonce_hex")
+                        encrypted_data_hex = cred.get("encrypted_data_hex")
+                        if nonce_hex and encrypted_data_hex and (nonce_hex, encrypted_data_hex) in local_signatures:
+                            continue
+                        combined_list.append({"id": cred.get("id"), "nonce_hex": nonce_hex, "encrypted_data_hex": encrypted_data_hex, "source": " Cloud"})
             except requests.exceptions.ConnectionError:
                 ctk.CTkLabel(self.scroll_frame, text=" Offline mode: displaying local credentials only", text_color="#ffcc00", font=self.icon_button_font).pack(pady=(0,10))
 
