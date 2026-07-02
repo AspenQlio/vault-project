@@ -3,23 +3,23 @@ from pydantic import BaseModel
 from sqlalchemy import create_engine, Column, Integer, String
 from sqlalchemy.orm import sessionmaker, Session, declarative_base
 
-SQLALCHEMY_DATABASE_URL = "sqlite:///./boveda.db"
+SQLALCHEMY_DATABASE_URL = "sqlite:///./vault.db"
 engine = create_engine(SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
-class UsuarioDB(Base):
-    __tablename__ = "usuarios"
+class UserDB(Base):
+    __tablename__ = "users"
     id = Column(Integer, primary_key=True, index=True)
     username = Column(String, unique=True, index=True)
     auth_hash = Column(String)
 
-class CredencialDB(Base):
-    __tablename__ = "credenciales"
+class CredentialDB(Base):
+    __tablename__ = "credentials"
     id = Column(Integer, primary_key=True, index=True)
-    id_usuario = Column(String, index=True)
+    user_id = Column(String, index=True)
     nonce_hex = Column(String)
-    datos_cifrados_hex = Column(String)
+    encrypted_data_hex = Column(String)
 
 Base.metadata.create_all(bind=engine)
 
@@ -30,14 +30,14 @@ class AuthPayload(BaseModel):
     auth_hash: str
 
 class VaultPayload(BaseModel):
-    id_usuario: str
+    user_id: str
     nonce_hex: str
-    datos_cifrados_hex: str
+    encrypted_data_hex: str
 
-# NUEVO: Payload exclusivo para actualizaciones (no necesita el id_usuario en el body)
+# New: update-only payload (does not need the user_id in the body)
 class UpdatePayload(BaseModel):
     nonce_hex: str
-    datos_cifrados_hex: str
+    encrypted_data_hex: str
 
 def get_db():
     db = SessionLocal()
@@ -47,57 +47,57 @@ def get_db():
         db.close()
 
 @app.post("/api/register")
-def registrar_usuario(payload: AuthPayload, db: Session = Depends(get_db)):
-    usuario_existente = db.query(UsuarioDB).filter(UsuarioDB.username == payload.username).first()
-    if usuario_existente:
-        raise HTTPException(status_code=400, detail="El usuario ya existe")
-    nuevo_usuario = UsuarioDB(username=payload.username, auth_hash=payload.auth_hash)
-    db.add(nuevo_usuario)
+def register_user(payload: AuthPayload, db: Session = Depends(get_db)):
+    existing_user = db.query(UserDB).filter(UserDB.username == payload.username).first()
+    if existing_user:
+        raise HTTPException(status_code=400, detail="User already exists")
+    new_user = UserDB(username=payload.username, auth_hash=payload.auth_hash)
+    db.add(new_user)
     db.commit()
-    return {"estado": "exito", "mensaje": "Cuenta creada"}
+    return {"status": "success", "message": "Account created"}
 
 @app.post("/api/login")
-def iniciar_sesion(payload: AuthPayload, db: Session = Depends(get_db)):
-    usuario = db.query(UsuarioDB).filter(UsuarioDB.username == payload.username).first()
-    if not usuario or usuario.auth_hash != payload.auth_hash:
-        raise HTTPException(status_code=401, detail="Credenciales incorrectas")
-    return {"estado": "exito", "mensaje": "Autenticado"}
+def login_user(payload: AuthPayload, db: Session = Depends(get_db)):
+    user = db.query(UserDB).filter(UserDB.username == payload.username).first()
+    if not user or user.auth_hash != payload.auth_hash:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    return {"status": "success", "message": "Authenticated"}
 
 @app.post("/api/sync")
-def sincronizar_boveda(payload: VaultPayload, db: Session = Depends(get_db)):
-    nueva_credencial = CredencialDB(
-        id_usuario=payload.id_usuario, nonce_hex=payload.nonce_hex, datos_cifrados_hex=payload.datos_cifrados_hex
+def sync_vault(payload: VaultPayload, db: Session = Depends(get_db)):
+    new_credential = CredentialDB(
+        user_id=payload.user_id, nonce_hex=payload.nonce_hex, encrypted_data_hex=payload.encrypted_data_hex
     )
-    db.add(nueva_credencial)
+    db.add(new_credential)
     db.commit()
-    return {"estado": "exito"}
+    return {"status": "success"}
 
-@app.get("/api/sync/{id_usuario}")
-def obtener_boveda(id_usuario: str, db: Session = Depends(get_db)):
-    credenciales = db.query(CredencialDB).filter(CredencialDB.id_usuario == id_usuario).all()
-    if not credenciales:
-        return {"estado": "vacio", "credenciales": []}
-    lista = [{"id": c.id, "nonce_hex": c.nonce_hex, "datos_cifrados_hex": c.datos_cifrados_hex} for c in credenciales]
-    return {"estado": "exito", "credenciales": lista}
+@app.get("/api/sync/{user_id}")
+def get_vault(user_id: str, db: Session = Depends(get_db)):
+    credentials = db.query(CredentialDB).filter(CredentialDB.user_id == user_id).all()
+    if not credentials:
+        return {"status": "empty", "credentials": []}
+    credential_list = [{"id": c.id, "nonce_hex": c.nonce_hex, "encrypted_data_hex": c.encrypted_data_hex} for c in credentials]
+    return {"status": "success", "credentials": credential_list}
 
-@app.delete("/api/sync/{id_usuario}/{cred_id}")
-def eliminar_credencial(id_usuario: str, cred_id: int, db: Session = Depends(get_db)):
-    credencial = db.query(CredencialDB).filter(CredencialDB.id_usuario == id_usuario, CredencialDB.id == cred_id).first()
-    if not credencial:
-        raise HTTPException(status_code=404, detail="Elemento no encontrado")
-    db.delete(credencial)
+@app.delete("/api/sync/{user_id}/{cred_id}")
+def delete_credential(user_id: str, cred_id: int, db: Session = Depends(get_db)):
+    credential = db.query(CredentialDB).filter(CredentialDB.user_id == user_id, CredentialDB.id == cred_id).first()
+    if not credential:
+        raise HTTPException(status_code=404, detail="Item not found")
+    db.delete(credential)
     db.commit()
-    return {"estado": "exito"}
+    return {"status": "success"}
 
-# --- NUEVA RUTA: ACTUALIZAR CREDENCIAL ---
-@app.put("/api/sync/{id_usuario}/{cred_id}")
-def actualizar_credencial(id_usuario: str, cred_id: int, payload: UpdatePayload, db: Session = Depends(get_db)):
-    credencial = db.query(CredencialDB).filter(CredencialDB.id_usuario == id_usuario, CredencialDB.id == cred_id).first()
-    if not credencial:
-        raise HTTPException(status_code=404, detail="Elemento no encontrado")
+# --- New route: update credential ---
+@app.put("/api/sync/{user_id}/{cred_id}")
+def update_credential(user_id: str, cred_id: int, payload: UpdatePayload, db: Session = Depends(get_db)):
+    credential = db.query(CredentialDB).filter(CredentialDB.user_id == user_id, CredentialDB.id == cred_id).first()
+    if not credential:
+        raise HTTPException(status_code=404, detail="Item not found")
     
-    credencial.nonce_hex = payload.nonce_hex
-    credencial.datos_cifrados_hex = payload.datos_cifrados_hex
+    credential.nonce_hex = payload.nonce_hex
+    credential.encrypted_data_hex = payload.encrypted_data_hex
     db.commit()
-    print(f"\n[☁️ Servidor] Credencial {cred_id} actualizada para el usuario: {id_usuario}")
-    return {"estado": "exito"}
+    print(f"\n[ Server] Credential {cred_id} updated for user: {user_id}")
+    return {"status": "success"}

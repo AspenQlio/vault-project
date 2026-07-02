@@ -49,7 +49,7 @@ class VaultApp(ctk.CTk):
 
     def initialize_local_db(self):
         # Initialize local SQLite database for offline credential storage
-        connection = sqlite3.connect("boveda_local.db")
+        connection = sqlite3.connect("vault_local.db")
         cursor = connection.cursor()
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS local_credentials (
@@ -184,7 +184,7 @@ class VaultApp(ctk.CTk):
 
         # Load local data
         try:
-            connection = sqlite3.connect("boveda_local.db")
+            connection = sqlite3.connect("vault_local.db")
             cursor = connection.cursor()
             cursor.execute("SELECT id, nonce_hex, encrypted_data_hex FROM local_credentials WHERE user_id = ?", (self.current_user,))
             rows = cursor.fetchall()
@@ -284,7 +284,7 @@ class VaultApp(ctk.CTk):
 
             if "Local" in source:
                 try:
-                    connection = sqlite3.connect("boveda_local.db")
+                    connection = sqlite3.connect("vault_local.db")
                     cursor = connection.cursor()
                     cursor.execute("DELETE FROM local_credentials WHERE id = ?", (db_id,))
                     connection.commit()
@@ -411,7 +411,7 @@ class VaultApp(ctk.CTk):
         if self.switch_var.get() == 0:
             # Save locally
             try:
-                connection = sqlite3.connect("boveda_local.db")
+                connection = sqlite3.connect("vault_local.db")
                 cursor = connection.cursor()
                 cursor.execute("INSERT INTO local_credentials (user_id, nonce_hex, encrypted_data_hex) VALUES (?, ?, ?)",(self.current_user, nonce.hex(), buffer.raw.hex()))
                 connection.commit()
@@ -450,7 +450,7 @@ class VaultApp(ctk.CTk):
 
         if "Local" in source:
             try:
-                connection = sqlite3.connect("boveda_local.db")
+                connection = sqlite3.connect("vault_local.db")
                 cursor = connection.cursor()
                 cursor.execute("UPDATE local_credentials SET nonce_hex = ?, encrypted_data_hex = ? WHERE id = ?", (nonce.hex(), buffer.raw.hex(), db_id))
                 connection.commit()
