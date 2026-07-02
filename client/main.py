@@ -9,17 +9,12 @@ import json
 import string
 import sqlite3
 
-# Server URL for the backend API
 SERVER_URL = "https://api-vault-cfd6.onrender.com"
 
 def automatic_cloud_download(username, user_id, db_path="vault_local.db", server_url=SERVER_URL):
-    """Fetches passwords from the cloud via Render and injects locally only those that are missing."""
     print(f"\n Downloading cloud credentials for user: {username}...")
-    
     try:
-        # Make the GET request to the server endpoint
         response = requests.get(f"{server_url}/api/sync/{username}", timeout=5)
-        
         if response.status_code == 200:
             payload = response.json()
             cloud_credentials = payload.get("credentials", payload if isinstance(payload, list) else [])
@@ -30,34 +25,21 @@ def automatic_cloud_download(username, user_id, db_path="vault_local.db", server
             
             conn = sqlite3.connect(db_path)
             cursor = conn.cursor()
-            
             new_downloads = 0
             
             for cred in cloud_credentials:
-                # Extract encrypted data
-                site = cred.get("sitio")
-                crypto_user = cred.get("usuario_hex") or cred.get("usuario_crypto")
-                crypto_pass = cred.get("datos_cifrados_hex") or cred.get("pass_crypto") or cred.get("encrypted_data_hex")
-                nonce = cred.get("nonce_hex") or cred.get("nonce")
+                nonce = cred.get("nonce_hex")
+                crypto_pass = cred.get("encrypted_data_hex") or cred.get("datos_cifrados_hex")
                 
-                # CRITICAL RULE: Check if it already exists LOCALLY for this user and site
-                # This prevents overwriting local passwords that were intentionally kept offline
-                if not site: # Cannot check for existence without a site
+                if not nonce or not crypto_pass:
                     continue
 
-                cursor.execute("""
-                    SELECT id FROM local_credentials 
-                    WHERE user_id = ? AND sitio = ?
-                """, (user_id, site))
-                
-                local_exists = cursor.fetchone()
-                
-                if not local_exists:
-                    # If it doesn't exist on the current PC, insert it directly with 'Cloud' status
+                cursor.execute("SELECT id FROM local_credentials WHERE user_id = ? AND nonce_hex = ?", (user_id, nonce))
+                if not cursor.fetchone():
                     cursor.execute("""
-                        INSERT INTO local_credentials (user_id, sitio, usuario_crypto, pass_crypto, nonce_hex, encrypted_data_hex, estado)
-                        VALUES (?, ?, ?, ?, ?, ?, 'Cloud')
-                    """, (user_id, site, crypto_user or "", crypto_pass, nonce, crypto_pass))
+                        INSERT INTO local_credentials (user_id, nonce_hex, encrypted_data_hex, estado)
+                        VALUES (?, ?, ?, 'Cloud')
+                    """, (user_id, nonce, crypto_pass))
                     new_downloads += 1
             
             conn.commit()
@@ -66,217 +48,14 @@ def automatic_cloud_download(username, user_id, db_path="vault_local.db", server
             if new_downloads > 0:
                 print(f" Sync complete! Downloaded {new_downloads} passwords from the cloud.")
             else:
-                print(" Everything is up to date. No new passwords in the cloud.")
-                
-        else:
-            print(f" Could not connect to the cloud to download (Code: {response.status_code}) - {response.text}")
-            
+                print(" Everything is up to date.")
     except Exception as e:
         print(f" Error during automatic download: {e}")
 
-def sync_with_cloud(user_id, db_path="vault_local.db", server_url=SERVER_URL, interactive=False):
-    print("\n Starting cloud sync...")
-
-    def sync_local_credentials(cursor, connection, rows, selected_ids=None):
-        synced_count = 0
-        total_count = 0
-
-        for row in rows:
-            record_id = row[0]
-            nonce_hex = row[1]
-            encrypted_data_hex = row[2]
-            status = row[3] if len(row) > 3 else None
-
-            if status == "Cloud":
-                print(f"󰒭 Skipping cloud-synced local record #{record_id}")
-                continue
-
-            if selected_ids is not None and record_id not in selected_ids:
-                print(f"󰒭 Skipping record #{record_id}")
-                continue
-
-            total_count += 1
-            payload = {
-                "user_id": user_id,
-                "nonce_hex": nonce_hex,
-                "encrypted_data_hex": encrypted_data_hex,
-            }
-
-            response = requests.post(f"{server_url}/api/sync", json=payload, timeout=3)
-
-            if response.status_code in (200, 201):
-                synced_count += 1
-                print(f" Synced record #{record_id}")
-            else:
-                print(f" Failed to sync record #{record_id}: {response.text}")
-
-        return synced_count, total_count
-
-    def sync_site_credentials(cursor, connection, rows, selected_sites=None, status_column=None):
-        synced_count = 0
-        total_count = 0
-
-        for record_id, site, crypto_user, crypto_pass, nonce_hex in rows:
-            if selected_sites is not None and site not in selected_sites:
-                print(f"󰒭 Skipping site '{site}'")
-                continue
-
-            total_count += 1
-            payload = {
-                "id_usuario": int(user_id) if str(user_id).isdigit() else user_id,
-                "sitio": site,
-                "usuario_hex": crypto_user,
-                "datos_cifrados_hex": crypto_pass,
-                "nonce_hex": nonce_hex,
-            }
-
-            response = requests.post(f"{server_url}/api/sync", json=payload, timeout=3)
-
-            if response.status_code in (200, 201):
-                synced_count += 1
-                print(f" Synced: {site}")
-                if status_column == "estado":
-                    cursor.execute("""
-                        UPDATE credenciales 
-                        SET estado = 'Cloud' 
-                        WHERE id_usuario = ? AND sitio = ?
-                    """, (user_id, site))
-                    connection.commit()
-                elif status_column == "modo":
-                    cursor.execute("""
-                        UPDATE credenciales 
-                        SET modo = 'Cloud' 
-                        WHERE id_usuario = ? AND sitio = ?
-                    """, (user_id, site))
-                    connection.commit()
-            else:
-                print(f" Failed to sync {site}: {response.text}")
-
-        return synced_count, total_count
-
-    try:
-        connection = sqlite3.connect(db_path)
-        cursor = connection.cursor()
-
-        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='local_credentials'")
-        has_local_credentials = cursor.fetchone() is not None
-
-        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='credenciales'")
-        has_site_credentials = cursor.fetchone() is not None
-
-        if not has_local_credentials and not has_site_credentials:
-            print(" No compatible local credentials table found.")
-            connection.close()
-            return 0, 0
-
-        if has_local_credentials:
-            cursor.execute("PRAGMA table_info(local_credentials)")
-            local_columns = {row[1] for row in cursor.fetchall()}
-
-            if "estado" in local_columns:
-                cursor.execute(
-                    "SELECT id, nonce_hex, encrypted_data_hex, estado FROM local_credentials WHERE user_id = ?",
-                    (user_id,),
-                )
-            else:
-                cursor.execute(
-                    "SELECT id, nonce_hex, encrypted_data_hex FROM local_credentials WHERE user_id = ?",
-                    (user_id,),
-                )
-            local_rows = cursor.fetchall()
-
-            if not local_rows:
-                print("󰆧 No local credentials to sync.")
-                connection.close()
-                return 0, 0
-
-            if interactive:
-                print("\n---  SYNC MENU ---")
-                print("1. Sync all local credentials to the cloud")
-                print("2. Select credentials manually")
-                print("3. Cancel")
-                option = input("Choose an option: ").strip()
-                if option == "3":
-                    print(" Sync cancelled.")
-                    connection.close()
-                    return 0, 0
-
-                if option == "2":
-                    selected_ids = set()
-                    for record_id, _, _ in local_rows:
-                        answer = input(f"Sync record #{record_id}? (y/n): ").strip().lower()
-                        if answer in {"y", "yes", "s", "si"}:
-                            selected_ids.add(record_id)
-                    synced_count, total_count = sync_local_credentials(cursor, connection, local_rows, selected_ids)
-                else:
-                    synced_count, total_count = sync_local_credentials(cursor, connection, local_rows)
-            else:
-                synced_count, total_count = sync_local_credentials(cursor, connection, local_rows)
-
-            print(f" Sync finished. {synced_count}/{total_count} credentials uploaded.")
-            connection.close()
-            return synced_count, total_count
-
-        cursor.execute("PRAGMA table_info(credenciales)")
-        site_columns = {row[1] for row in cursor.fetchall()}
-        status_column = None
-        if "estado" in site_columns:
-            status_column = "estado"
-        elif "modo" in site_columns:
-            status_column = "modo"
-
-        if interactive:
-            print("\n---  SYNC MENU ---")
-            print("1. Sync all local credentials to the cloud")
-            print("2. Select credentials manually")
-            print("3. Cancel")
-            option = input("Choose an option: ").strip()
-            if option == "3":
-                print(" Sync cancelled.")
-                connection.close()
-                return 0, 0
-        else:
-            option = "1"
-
-        query = "SELECT id, sitio, usuario_crypto, pass_crypto, nonce FROM credenciales WHERE id_usuario = ?"
-        if status_column is not None:
-            query += f" AND ({status_column} = 'local' OR {status_column} IS NULL)"
-
-        cursor.execute(query, (user_id,))
-        site_rows = cursor.fetchall()
-
-        if not site_rows:
-            print(" All credentials are already synced to the cloud.")
-            connection.close()
-            return 0, 0
-
-        if interactive and option == "2":
-            selected_sites = set()
-            for _, site, _, _, _ in site_rows:
-                answer = input(f"Sync '{site}' to the cloud? (y/n): ").strip().lower()
-                if answer in {"y", "yes", "s", "si"}:
-                    selected_sites.add(site)
-            synced_count, total_count = sync_site_credentials(cursor, connection, site_rows, selected_sites, status_column)
-        else:
-            synced_count, total_count = sync_site_credentials(cursor, connection, site_rows, None, status_column)
-
-        print(f" Sync finished. {synced_count}/{total_count} credentials uploaded.")
-        connection.close()
-        return synced_count, total_count
-
-    except requests.exceptions.ConnectionError:
-        raise
-    except Exception as e:
-        print(f" Error during sync: {e}")
-        return 0, 0
-
 def load_crypto_core():
-    # Load the C cryptographic library (libvault_crypto.so) using ctypes
     current_path = os.path.dirname(os.path.abspath(__file__))
     lib_path = os.path.join(current_path, "../core_crypto/libvault_crypto.so")
     core_lib = ctypes.CDLL(lib_path)
-    
-    # Configure C function prototypes and argument types for type safety
     core_lib.inicializar_motor.restype = ctypes.c_int
     core_lib.cifrar_credencial.argtypes = [ctypes.c_char_p, ctypes.c_ulonglong, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p]
     core_lib.cifrar_credencial.restype = ctypes.c_int
@@ -288,13 +67,11 @@ class VaultApp(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title("Vault - Zero Knowledge (Hybrid Architecture)")
-        self.geometry("950x600")
-        self.minsize(850, 500)
-
+        self.geometry("950x650")
+        self.minsize(850, 600)
         self.icon_font = ("JetBrainsMono Nerd Font", 14)
         self.icon_title_font = ("JetBrainsMono Nerd Font", 24, "bold")
         self.icon_button_font = ("JetBrainsMono Nerd Font", 13)
-        
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
         
@@ -305,12 +82,39 @@ class VaultApp(ctk.CTk):
             
         self.symmetric_key = None
         self.current_user = None
+        self.inactivity_id = None
+        
+        # Variables for Password Generator
+        self.gen_len = ctk.IntVar(value=16)
+        self.gen_upper = ctk.BooleanVar(value=True)
+        self.gen_nums = ctk.BooleanVar(value=True)
+        self.gen_syms = ctk.BooleanVar(value=True)
+        
+        self.bind("<Any-KeyPress>", self.reset_inactivity_timer)
+        self.bind("<Any-Motion>", self.reset_inactivity_timer)
+        self.bind("<Any-Button>", self.reset_inactivity_timer)
         
         self.initialize_local_db()
         self.show_welcome_screen()
 
+    def reset_inactivity_timer(self, event=None):
+        if not self.current_user:
+            return
+        if self.inactivity_id is not None:
+            self.after_cancel(self.inactivity_id)
+        self.inactivity_id = self.after(60000, self.lock_vault)
+
+    def lock_vault(self):
+        self.current_user = None
+        self.symmetric_key = None
+        self.clipboard_clear()
+        if self.inactivity_id is not None:
+            self.after_cancel(self.inactivity_id)
+            self.inactivity_id = None
+        print(" Vault locked for security reasons.")
+        self.show_welcome_screen()
+
     def initialize_local_db(self):
-        # Initialize local SQLite database for offline credential storage
         connection = sqlite3.connect("vault_local.db")
         cursor = connection.cursor()
         cursor.execute('''
@@ -324,12 +128,11 @@ class VaultApp(ctk.CTk):
         cursor.execute("PRAGMA table_info(local_credentials)")
         existing_columns = {row[1] for row in cursor.fetchall()}
         
-        # Keep the exact Spanish SQL column names to prevent database corruption
         for column_name, column_type in (
             ("sitio", "TEXT"),
             ("usuario_crypto", "TEXT"),
             ("pass_crypto", "TEXT"),
-            ("estado", "TEXT"),
+            ("estado", "TEXT DEFAULT 'Local'"),
         ):
             if column_name not in existing_columns:
                 cursor.execute(f"ALTER TABLE local_credentials ADD COLUMN {column_name} {column_type}")
@@ -337,12 +140,10 @@ class VaultApp(ctk.CTk):
         connection.close()
 
     def clear_screen(self):
-        # Remove all child widgets from window for screen transition
         for widget in self.winfo_children():
             widget.destroy()
 
     def process_keys(self, password):
-        # Derive authentication hash and symmetric encryption key from master password
         auth_hash = hashlib.sha256((password + "auth_salt").encode('utf-8')).hexdigest()
         encryption_key = hashlib.sha256((password + "enc_salt").encode('utf-8')).digest()
         return auth_hash, encryption_key
@@ -397,23 +198,21 @@ class VaultApp(ctk.CTk):
             return
         
         auth_hash, encryption_key = self.process_keys(password)
-        
         try:
             res = requests.post(f"{SERVER_URL}/api/login", json={"username": username, "auth_hash": auth_hash})
             if res.status_code == 200:
                 self.current_user = username
                 self.symmetric_key = encryption_key
-                try:
-                    automatic_cloud_download(username, username)
-                except Exception as download_error:
-                    print(f"Automatic cloud download skipped: {download_error}")
+                self.reset_inactivity_timer()
+                automatic_cloud_download(username, username)
                 self.show_main_screen()
             else:
                 self.lbl_error.configure(text="Invalid credentials.", text_color="#ff4a4a")
         except requests.exceptions.ConnectionError:
             self.current_user = username
             self.symmetric_key = encryption_key
-            print("\n[OFFLINE MODE] Starting vault in local mode without cloud synchronization.")
+            self.reset_inactivity_timer()
+            print("\n[OFFLINE MODE] Starting vault in local mode.")
             self.show_main_screen()
 
     def show_main_screen(self):
@@ -423,7 +222,7 @@ class VaultApp(ctk.CTk):
         
         self.sidebar = ctk.CTkFrame(self, width=220, corner_radius=0)
         self.sidebar.grid(row=0, column=0, sticky="nsew")
-        self.sidebar.grid_rowconfigure(7, weight=1)
+        self.sidebar.grid_rowconfigure(8, weight=1)
         
         ctk.CTkLabel(self.sidebar, text="󰌾 Vault", font=self.icon_title_font).grid(row=0, column=0, padx=20, pady=(30, 5), sticky="w")
         ctk.CTkLabel(self.sidebar, text=f" {self.current_user}", font=("Roboto", 12), text_color="gray").grid(row=1, column=0, padx=20, pady=(0, 30), sticky="w")
@@ -431,8 +230,10 @@ class VaultApp(ctk.CTk):
         ctk.CTkButton(self.sidebar, text=" All Accounts", anchor="w", fg_color="transparent", font=self.icon_button_font, command=self.show_list_view).grid(row=2, column=0, padx=10, pady=5, sticky="ew")
         ctk.CTkButton(self.sidebar, text="󰈀 Local Passwords", anchor="w", fg_color="transparent", font=self.icon_button_font, command=self.show_local_view).grid(row=3, column=0, padx=10, pady=5, sticky="ew")
         ctk.CTkButton(self.sidebar, text=" Add Item", anchor="w", fg_color="transparent", font=self.icon_button_font, command=self.show_form_view).grid(row=4, column=0, padx=10, pady=5, sticky="ew")
-        ctk.CTkButton(self.sidebar, text=" Sync Now", anchor="w", fg_color="transparent", font=self.icon_button_font, command=self.sync_to_cloud).grid(row=5, column=0, padx=10, pady=5, sticky="ew")
-        ctk.CTkButton(self.sidebar, text=" Exit", fg_color="#3b3b3b", hover_color="#ff4a4a", font=self.icon_button_font, command=self.exit_app).grid(row=6, column=0, padx=20, pady=30, sticky="ew")
+        ctk.CTkButton(self.sidebar, text=" Settings", anchor="w", fg_color="transparent", font=self.icon_button_font, command=self.show_settings_view).grid(row=5, column=0, padx=10, pady=5, sticky="ew")
+        
+        ctk.CTkButton(self.sidebar, text=" Lock Vault", anchor="w", fg_color="transparent", font=self.icon_button_font, command=self.lock_vault).grid(row=6, column=0, padx=10, pady=5, sticky="ew")
+        ctk.CTkButton(self.sidebar, text=" Exit", fg_color="#3b3b3b", hover_color="#ff4a4a", font=self.icon_button_font, command=self.exit_app).grid(row=7, column=0, padx=20, pady=30, sticky="ew")
 
         self.central_panel = ctk.CTkFrame(self, corner_radius=0, fg_color="transparent")
         self.central_panel.grid(row=0, column=1, sticky="nsew", padx=30, pady=30)
@@ -442,33 +243,36 @@ class VaultApp(ctk.CTk):
         self.show_list_view()
 
     def clear_central_panel(self):
-        # Clear central display panel of all child widgets
         for widget in self.central_panel.winfo_children():
             widget.destroy()
 
-    def sync_to_cloud(self):
-        def show_feedback(message, color=None, title="Vault"):
-            if hasattr(self, "lbl_status"):
-                self.lbl_status.configure(text=message, text_color=color or "white")
-            elif color == "#ff4a4a":
-                messagebox.showerror(title, message)
-            else:
-                messagebox.showinfo(title, message)
-
+    def sync_single_credential(self, db_id):
+        if not messagebox.askyesno("Sync Warning", " Once you sync you can't redo this.\n\nAre you sure you want to proceed?"):
+            return
+            
         try:
-            synced_count, total_count = sync_with_cloud(self.current_user)
-            if total_count == 0:
-                show_feedback("No local items to sync.", "gray")
-                return
+            connection = sqlite3.connect("vault_local.db")
+            cursor = connection.cursor()
+            cursor.execute("SELECT nonce_hex, encrypted_data_hex FROM local_credentials WHERE id = ?", (db_id,))
+            row = cursor.fetchone()
+            
+            if row:
+                nonce_hex, encrypted_data_hex = row[0], row[1]
+                payload = {"user_id": self.current_user, "nonce_hex": nonce_hex, "encrypted_data_hex": encrypted_data_hex}
+                
+                response = requests.post(f"{SERVER_URL}/api/sync", json=payload, timeout=5)
 
-            show_feedback(f" Sync complete: {synced_count}/{total_count} item(s) uploaded.", "#5cacee")
-            self.clear_central_panel()
-            self.after(1000, self.show_list_view)
-        except requests.exceptions.ConnectionError:
-            show_feedback("Network error.", "#ff4a4a")
+                if response.status_code in (200, 201):
+                    cursor.execute("UPDATE local_credentials SET estado = 'Cloud' WHERE id = ?", (db_id,))
+                    connection.commit()
+                    messagebox.showinfo("Sync Status", " Password successfully synced to the cloud!")
+                    self.clear_central_panel()
+                    self.show_list_view()
+                else:
+                    messagebox.showerror("Sync Error", f" Server rejected sync: {response.text}")
+            connection.close()
         except Exception as e:
-            show_feedback("Sync failed.", "#ff4a4a")
-            print(f"Error syncing to cloud: {e}")
+            messagebox.showerror("Sync Error", f" Synchronization failed: {e}")
 
     def show_list_view(self):
         self._show_credentials_view(include_cloud=True, title_text="󰆼 Safe Box")
@@ -483,13 +287,7 @@ class VaultApp(ctk.CTk):
         header.grid_columnconfigure(0, weight=1)
         
         ctk.CTkLabel(header, text=title_text, font=self.icon_title_font).grid(row=0, column=0, sticky="w")
-        ctk.CTkButton(
-            header,
-            text=" Refresh",
-            width=120,
-            font=self.icon_button_font,
-            command=lambda: self._show_credentials_view(include_cloud=include_cloud, title_text=title_text),
-        ).grid(row=0, column=1, sticky="e")
+        ctk.CTkButton(header, text=" Refresh", width=120, font=self.icon_button_font, command=lambda: self._show_credentials_view(include_cloud, title_text)).grid(row=0, column=1, sticky="e")
         
         self.scroll_frame = ctk.CTkScrollableFrame(self.central_panel, fg_color="transparent")
         self.scroll_frame.grid(row=1, column=0, sticky="nsew")
@@ -497,49 +295,17 @@ class VaultApp(ctk.CTk):
 
     def load_and_decrypt_data(self, include_cloud=True):
         combined_list = []
-        local_signatures = set()
-
-        # Clear previous cards before redrawing the updated list
-        for widget in self.scroll_frame.winfo_children():
-            widget.destroy()
-
-        # Load local data
         try:
             connection = sqlite3.connect("vault_local.db")
             cursor = connection.cursor()
-            cursor.execute("PRAGMA table_info(local_credentials)")
-            local_columns = {row[1] for row in cursor.fetchall()}
-            if "estado" in local_columns:
-                cursor.execute(
-                    "SELECT id, nonce_hex, encrypted_data_hex, estado FROM local_credentials WHERE user_id = ?",
-                    (self.current_user,),
-                )
-            else:
-                cursor.execute("SELECT id, nonce_hex, encrypted_data_hex FROM local_credentials WHERE user_id = ?", (self.current_user,))
-            rows = cursor.fetchall()
-            for row in rows:
-                status = row[3] if len(row) > 3 else None
-                source = " Cloud" if status == "Cloud" else " Local"
-                local_signatures.add((row[1], row[2]))
+            cursor.execute("SELECT id, nonce_hex, encrypted_data_hex, estado FROM local_credentials WHERE user_id = ?", (self.current_user,))
+            for row in cursor.fetchall():
+                estado = row[3] if row[3] else "Local"
+                source = " Cloud" if estado == "Cloud" else " Local"
                 combined_list.append({"id": row[0], "nonce_hex": row[1], "encrypted_data_hex": row[2], "source": source})
             connection.close()
-        except Exception:
-            pass
-
-        if include_cloud:
-            # Fetch and load cloud data
-            try:
-                response = requests.get(f"{SERVER_URL}/api/sync/{self.current_user}", timeout=2)
-                if response.status_code == 200:
-                    cloud_data = response.json().get("credentials", [])
-                    for cred in cloud_data:
-                        nonce_hex = cred.get("nonce_hex")
-                        encrypted_data_hex = cred.get("encrypted_data_hex")
-                        if nonce_hex and encrypted_data_hex and (nonce_hex, encrypted_data_hex) in local_signatures:
-                            continue
-                        combined_list.append({"id": cred.get("id"), "nonce_hex": nonce_hex, "encrypted_data_hex": encrypted_data_hex, "source": " Cloud"})
-            except requests.exceptions.ConnectionError:
-                ctk.CTkLabel(self.scroll_frame, text=" Offline mode: displaying local credentials only", text_color="#ffcc00", font=self.icon_button_font).pack(pady=(0,10))
+        except Exception as e:
+            print(f"Error loading local data: {e}")
 
         if not combined_list:
             ctk.CTkLabel(self.scroll_frame, text=" Vault is empty.", text_color="gray", font=self.icon_button_font).pack(pady=40)
@@ -548,22 +314,17 @@ class VaultApp(ctk.CTk):
         for cred in combined_list:
             nonce = bytes.fromhex(cred["nonce_hex"])
             encrypted_bytes = bytes.fromhex(cred["encrypted_data_hex"])
-            
-            if len(encrypted_bytes) < 16:
-                continue
+            if len(encrypted_bytes) < 16: continue
                 
             plain_length = len(encrypted_bytes) - 16
             decrypted_buffer = ctypes.create_string_buffer(plain_length + 1)
             
             if self.core.descifrar_credencial(encrypted_bytes, len(encrypted_bytes), nonce, self.symmetric_key, decrypted_buffer) == 0:
-                text = decrypted_buffer.value.decode('utf-8')
                 try:
-                    data_dict = json.loads(text)
+                    data_dict = json.loads(decrypted_buffer.value.decode('utf-8'))
                     self.create_credential_card(cred["id"], data_dict.get("service", ""), data_dict.get("username", ""), data_dict.get("password", ""), cred["source"])
-                except json.JSONDecodeError:
+                except Exception:
                     pass
-            else:
-                ctk.CTkLabel(self.scroll_frame, text=" Decryption error", text_color="#ff4a4a", font=self.icon_button_font).pack(pady=10)
 
     def create_credential_card(self, db_id, service, username, password, source):
         card = ctk.CTkFrame(self.scroll_frame, corner_radius=10, fg_color="#2b2b2b")
@@ -574,7 +335,6 @@ class VaultApp(ctk.CTk):
         
         source_color = "#4aff6b" if "Local" in source else "#5cacee"
         ctk.CTkLabel(info_frame, text=source, font=("Roboto", 10, "bold"), text_color=source_color).pack(anchor="w")
-        
         ctk.CTkLabel(info_frame, text=service, font=("Roboto", 18, "bold")).pack(anchor="w")
         ctk.CTkLabel(info_frame, text=f" {username}", font=("Roboto", 14), text_color="gray").pack(anchor="w", pady=(2,0))
         
@@ -602,47 +362,31 @@ class VaultApp(ctk.CTk):
             self.clipboard_append(password)
             btn_copy.configure(text=" Copied", text_color="#4aff6b")
             self.after(2000, lambda: btn_copy.configure(text=" Copy", text_color="white"))
+            self.after(10000, self.clipboard_clear)
             
         btn_copy = ctk.CTkButton(pwd_frame, text=" Copy", width=80, fg_color="#3b3b3b", hover_color="#555555", font=self.icon_button_font, command=copy_to_clipboard)
         btn_copy.pack(side="left", padx=(0, 5))
 
-        # Edit button for modifying existing credentials
-        btn_edit = ctk.CTkButton(pwd_frame, text=" Edit", width=80, fg_color="#3b3b3b", hover_color="#ffcc00", font=self.icon_button_font, command=lambda: self.prepare_edit_view(db_id, service, username, password, source))
-        btn_edit.pack(side="left", padx=(0, 5))
+        if "Local" in source:
+            btn_sync = ctk.CTkButton(pwd_frame, text=" Sync", width=80, fg_color="#3b3b3b", hover_color="#5cacee", font=self.icon_button_font, command=lambda: self.sync_single_credential(db_id))
+            btn_sync.pack(side="left", padx=(0, 5))
 
         def delete_item():
-            # Request user confirmation before permanent deletion
-            confirmation = messagebox.askyesno(
-                title="Confirm Deletion",
-                message=f"Are you sure you want to delete '{service}'?\n\nThis action cannot be undone."
-            )
-            if not confirmation:
-                return
+            if not messagebox.askyesno("Confirm", f"Delete '{service}'?"): return
+            try:
+                if "Cloud" in source:
+                    requests.delete(f"{SERVER_URL}/api/sync/{self.current_user}/{db_id}", timeout=3)
+                connection = sqlite3.connect("vault_local.db")
+                cursor = connection.cursor()
+                cursor.execute("DELETE FROM local_credentials WHERE id = ?", (db_id,))
+                connection.commit()
+                connection.close()
+                card.destroy()
+            except Exception as e:
+                print(f"Delete failed: {e}")
 
-            if "Local" in source:
-                try:
-                    connection = sqlite3.connect("vault_local.db")
-                    cursor = connection.cursor()
-                    cursor.execute("DELETE FROM local_credentials WHERE id = ?", (db_id,))
-                    connection.commit()
-                    connection.close()
-                    card.destroy()
-                except Exception as e:
-                    print(f"Error deleting: {e}")
-            else:
-                try:
-                    res = requests.delete(f"{SERVER_URL}/api/sync/{self.current_user}/{db_id}", timeout=3)
-                    if res.status_code == 200:
-                        card.destroy()
-                except Exception as e:
-                    print(f"Error deleting from cloud: {e}")
+        ctk.CTkButton(pwd_frame, text=" Delete", width=80, fg_color="#3b3b3b", hover_color="#ff4a4a", font=self.icon_button_font, command=delete_item).pack(side="left")
 
-        btn_delete = ctk.CTkButton(pwd_frame, text=" Delete", width=80, fg_color="#3b3b3b", hover_color="#ff4a4a", font=self.icon_button_font, command=delete_item)
-        btn_delete.pack(side="left")
-
-    # ==========================================
-    # CREDENTIAL FORM MANAGEMENT: CREATE, EDIT, DELETE
-    # ==========================================
     def show_form_view(self):
         self.clear_central_panel()
         ctk.CTkLabel(self.central_panel, text=" Add Item", font=self.icon_title_font).grid(row=0, column=0, sticky="w", pady=(0, 20))
@@ -650,160 +394,168 @@ class VaultApp(ctk.CTk):
         form_frame = ctk.CTkFrame(self.central_panel, corner_radius=10, fg_color="#2b2b2b")
         form_frame.grid(row=1, column=0, sticky="nsew")
         
-        ctk.CTkLabel(form_frame, text="Service Name", font=("Roboto", 14)).pack(anchor="w", padx=30, pady=(20, 5))
+        ctk.CTkLabel(form_frame, text="Service Name").pack(anchor="w", padx=30, pady=(20, 5))
         self.entry_service = ctk.CTkEntry(form_frame, width=400, height=40)
         self.entry_service.pack(anchor="w", padx=30)
         
-        ctk.CTkLabel(form_frame, text="Username / Email", font=("Roboto", 14)).pack(anchor="w", padx=30, pady=(15, 5))
+        ctk.CTkLabel(form_frame, text="Username / Email").pack(anchor="w", padx=30, pady=(15, 5))
         self.entry_username = ctk.CTkEntry(form_frame, width=400, height=40)
         self.entry_username.pack(anchor="w", padx=30)
         
-        ctk.CTkLabel(form_frame, text="Password", font=("Roboto", 14)).pack(anchor="w", padx=30, pady=(15, 5))
-        
+        ctk.CTkLabel(form_frame, text="Password").pack(anchor="w", padx=30, pady=(15, 5))
         pwd_container = ctk.CTkFrame(form_frame, fg_color="transparent")
         pwd_container.pack(anchor="w", padx=30)
         
         self.entry_pass = ctk.CTkEntry(pwd_container, width=340, height=40, show="*")
         self.entry_pass.pack(side="left", padx=(0, 10))
         
-        btn_gen = ctk.CTkButton(pwd_container, text=" Gen", width=70, height=40, fg_color="#3b3b3b", hover_color="#555555", font=self.icon_button_font, command=self.generate_password)
+        btn_gen = ctk.CTkButton(pwd_container, text=" Gen", width=70, height=40, fg_color="#3b3b3b", font=self.icon_button_font, command=self.generate_password)
         btn_gen.pack(side="left")
+
+        # Custom Generator Options
+        opt_frame = ctk.CTkFrame(form_frame, fg_color="transparent")
+        opt_frame.pack(anchor="w", padx=30, pady=(5, 10))
+        
+        ctk.CTkLabel(opt_frame, text="Length:").pack(side="left")
+        lbl_len = ctk.CTkLabel(opt_frame, text=str(self.gen_len.get()), width=20)
+        lbl_len.pack(side="left", padx=(5, 10))
+        
+        def update_len_lbl(val): lbl_len.configure(text=str(int(val)))
+        ctk.CTkSlider(opt_frame, from_=8, to=32, variable=self.gen_len, command=update_len_lbl, width=120).pack(side="left", padx=(0, 20))
+        
+        ctk.CTkCheckBox(opt_frame, text="A-Z", variable=self.gen_upper, width=50).pack(side="left", padx=5)
+        ctk.CTkCheckBox(opt_frame, text="0-9", variable=self.gen_nums, width=50).pack(side="left", padx=5)
+        ctk.CTkCheckBox(opt_frame, text="!@#", variable=self.gen_syms, width=50).pack(side="left", padx=5)
         
         self.switch_var = ctk.IntVar(value=0)
-        self.switch_cloud = ctk.CTkSwitch(form_frame, text=" Sync to Cloud (Off = Local Save)", variable=self.switch_var, font=self.icon_button_font)
-        self.switch_cloud.pack(anchor="w", padx=30, pady=(20, 10))
+        ctk.CTkSwitch(form_frame, text=" Sync to Cloud", variable=self.switch_var).pack(anchor="w", padx=30, pady=(15, 10))
         
-        self.lbl_status = ctk.CTkLabel(form_frame, text="", font=("Roboto", 14))
-        self.lbl_status.pack(anchor="w", padx=30, pady=5)
-        
-        ctk.CTkButton(form_frame, text=" Save to Vault", height=45, width=200, font=self.icon_button_font, command=self.save_data).pack(anchor="w", padx=30, pady=(0, 30))
-
-    def prepare_edit_view(self, db_id, service, username, password, source):
-        self.clear_central_panel()
-        ctk.CTkLabel(self.central_panel, text=" Edit Item", font=self.icon_title_font).grid(row=0, column=0, sticky="w", pady=(0, 20))
-
-        form_frame = ctk.CTkFrame(self.central_panel, corner_radius=10, fg_color="#2b2b2b")
-        form_frame.grid(row=1, column=0, sticky="nsew")
-
-        ctk.CTkLabel(form_frame, text="Service Name", font=("Roboto", 14)).pack(anchor="w", padx=30, pady=(20, 5))
-        self.entry_service = ctk.CTkEntry(form_frame, width=400, height=40)
-        self.entry_service.insert(0, service)
-        self.entry_service.pack(anchor="w", padx=30)
-
-        ctk.CTkLabel(form_frame, text="Username / Email", font=("Roboto", 14)).pack(anchor="w", padx=30, pady=(15, 5))
-        self.entry_username = ctk.CTkEntry(form_frame, width=400, height=40)
-        self.entry_username.insert(0, username)
-        self.entry_username.pack(anchor="w", padx=30)
-
-        ctk.CTkLabel(form_frame, text="Password", font=("Roboto", 14)).pack(anchor="w", padx=30, pady=(15, 5))
-
-        pwd_container = ctk.CTkFrame(form_frame, fg_color="transparent")
-        pwd_container.pack(anchor="w", padx=30)
-
-        self.entry_pass = ctk.CTkEntry(pwd_container, width=340, height=40, show="*")
-        self.entry_pass.insert(0, password)
-        self.entry_pass.pack(side="left", padx=(0, 10))
-
-        btn_gen = ctk.CTkButton(pwd_container, text=" Gen", width=70, height=40, fg_color="#3b3b3b", hover_color="#555555", font=self.icon_button_font, command=self.generate_password)
-        btn_gen.pack(side="left")
-
-        # Prevent storage location change during edit to maintain data consistency
-        ctk.CTkLabel(form_frame, text=f"󰆳 Storage: {source} (immutable during edit)", font=self.icon_button_font, text_color="gray").pack(anchor="w", padx=30, pady=(20, 0))
-
-        self.lbl_status = ctk.CTkLabel(form_frame, text="", font=("Roboto", 14))
-        self.lbl_status.pack(anchor="w", padx=30, pady=5)
-
-        buttons_frame = ctk.CTkFrame(form_frame, fg_color="transparent")
-        buttons_frame.pack(anchor="w", padx=30, pady=(0, 30))
-
-        ctk.CTkButton(buttons_frame, text=" Save Changes", height=45, width=170, font=self.icon_button_font, command=lambda: self.update_data(db_id, source)).pack(side="left", padx=(0, 10))
-        ctk.CTkButton(buttons_frame, text=" Cancel", height=45, width=100, fg_color="#3b3b3b", hover_color="#555555", font=self.icon_button_font, command=self.show_list_view).pack(side="left")
+        ctk.CTkButton(form_frame, text=" Save to Vault", height=45, width=200, command=self.save_data).pack(anchor="w", padx=30, pady=(10, 30))
 
     def generate_password(self):
-        # Generate cryptographically secure 16-character password with mixed character types
-        characters = string.ascii_letters + string.digits + "!@#$%^&*"
-        secure_pwd = "".join(secrets.choice(characters) for _ in range(16))
+        chars = string.ascii_lowercase
+        if self.gen_upper.get(): chars += string.ascii_uppercase
+        if self.gen_nums.get(): chars += string.digits
+        if self.gen_syms.get(): chars += "!@#$%^&*"
+        
+        if not chars: chars = string.ascii_lowercase
+        
+        pwd = "".join(secrets.choice(chars) for _ in range(self.gen_len.get()))
         self.entry_pass.delete(0, 'end')
-        self.entry_pass.insert(0, secure_pwd)
-        self.entry_pass.configure(show="")  # Display password for user verification
+        self.entry_pass.insert(0, pwd)
+        self.entry_pass.configure(show="")
+
+    def show_settings_view(self):
+        self.clear_central_panel()
+        ctk.CTkLabel(self.central_panel, text=" Settings & Security", font=self.icon_title_font).grid(row=0, column=0, sticky="w", pady=(0, 20))
+        
+        frame = ctk.CTkFrame(self.central_panel, corner_radius=10, fg_color="#2b2b2b")
+        frame.grid(row=1, column=0, sticky="nsew")
+        
+        ctk.CTkLabel(frame, text="Change Master Password", font=("Roboto", 18, "bold")).pack(anchor="w", padx=30, pady=(20, 10))
+        
+        ctk.CTkLabel(frame, text="Current Password").pack(anchor="w", padx=30, pady=(5, 5))
+        self.entry_old_pwd = ctk.CTkEntry(frame, width=300, show="*")
+        self.entry_old_pwd.pack(anchor="w", padx=30)
+        
+        ctk.CTkLabel(frame, text="New Password").pack(anchor="w", padx=30, pady=(15, 5))
+        self.entry_new_pwd = ctk.CTkEntry(frame, width=300, show="*")
+        self.entry_new_pwd.pack(anchor="w", padx=30)
+        
+        ctk.CTkButton(frame, text=" Re-Encrypt Vault", fg_color="#ff4a4a", hover_color="#cc0000", height=40, font=self.icon_button_font, command=self.execute_reencryption).pack(anchor="w", padx=30, pady=(25, 30))
+
+    def execute_reencryption(self):
+        old_pwd = self.entry_old_pwd.get()
+        new_pwd = self.entry_new_pwd.get()
+        
+        if not old_pwd or not new_pwd:
+            messagebox.showwarning("Warning", "Please fill in both password fields.")
+            return
+            
+        old_hash, old_key = self.process_keys(old_pwd)
+        
+        if old_key != self.symmetric_key:
+            messagebox.showerror("Security Error", "Current master password is incorrect.")
+            return
+            
+        if not messagebox.askyesno("Critical Action", "This will decrypt and re-encrypt your entire vault with the new password.\n\nDo not close the application during this process. Proceed?"):
+            return
+            
+        new_hash, new_key = self.process_keys(new_pwd)
+        
+        try:
+            conn = sqlite3.connect("vault_local.db")
+            cursor = conn.cursor()
+            cursor.execute("SELECT id, nonce_hex, encrypted_data_hex FROM local_credentials WHERE user_id = ?", (self.current_user,))
+            rows = cursor.fetchall()
+            
+            for row in rows:
+                db_id, nonce_hex, enc_hex = row
+                nonce = bytes.fromhex(nonce_hex)
+                enc_bytes = bytes.fromhex(enc_hex)
+                
+                plain_len = len(enc_bytes) - 16
+                dec_buf = ctypes.create_string_buffer(plain_len + 1)
+                if self.core.descifrar_credencial(enc_bytes, len(enc_bytes), nonce, old_key, dec_buf) != 0:
+                    continue 
+                    
+                new_nonce = secrets.token_bytes(24)
+                enc_buf = ctypes.create_string_buffer(plain_len + 16)
+                self.core.cifrar_credencial(dec_buf.raw[:plain_len], plain_len, new_nonce, new_key, enc_buf)
+                
+                cursor.execute("UPDATE local_credentials SET nonce_hex = ?, encrypted_data_hex = ?, estado = 'Local' WHERE id = ?", (new_nonce.hex(), enc_buf.raw.hex(), db_id))
+                
+            conn.commit()
+            conn.close()
+
+            # Enviar el nuevo hash a Render
+            try:
+                res = requests.put(f"{SERVER_URL}/api/update_hash", json={
+                    "username": self.current_user,
+                    "old_auth_hash": old_hash,
+                    "new_auth_hash": new_hash
+                }, timeout=5)
+                
+                if res.status_code != 200:
+                    messagebox.showwarning("Cloud Warning", "Local vault re-encrypted, but failed to sync new master password to the cloud. You might need to login offline.")
+            except requests.exceptions.ConnectionError:
+                messagebox.showwarning("Offline", "Vault re-encrypted locally, but you are offline. Cloud password not updated.")
+
+            self.symmetric_key = new_key
+            messagebox.showinfo("Success", "Vault re-encrypted successfully!\n\nAll items have been marked as 'Local'. Please use the Sync buttons to update the cloud with your new encryption keys.")
+            self.entry_old_pwd.delete(0, 'end')
+            self.entry_new_pwd.delete(0, 'end')
+            self.show_list_view()
+            
+        except Exception as e:
+            messagebox.showerror("Fatal Error", f"Failed to re-encrypt: {e}")
 
     def save_data(self):
-        service = self.entry_service.get()
-        username = self.entry_username.get()
-        password = self.entry_pass.get()
-        
-        if not service or not username or not password:
-            self.lbl_status.configure(text="Please fill all fields.", text_color="#ff4a4a")
-            return
+        service, username, password = self.entry_service.get(), self.entry_username.get(), self.entry_pass.get()
+        if not service or not username or not password: return
             
         data = json.dumps({"service": service, "username": username, "password": password}).encode('utf-8')
         length = len(data)
         nonce = secrets.token_bytes(24) 
         buffer = ctypes.create_string_buffer(length + 16)
         
-        if self.core.cifrar_credencial(data, length, nonce, self.symmetric_key, buffer) != 0:
-            self.lbl_status.configure(text="Encryption error.", text_color="#ff4a4a")
-            return
+        if self.core.cifrar_credencial(data, length, nonce, self.symmetric_key, buffer) != 0: return
 
-        if self.switch_var.get() == 0:
-            # Save locally
-            try:
-                connection = sqlite3.connect("vault_local.db")
-                cursor = connection.cursor()
-                cursor.execute("INSERT INTO local_credentials (user_id, nonce_hex, encrypted_data_hex) VALUES (?, ?, ?)",(self.current_user, nonce.hex(), buffer.raw.hex()))
-                connection.commit()
-                connection.close()
-                self.lbl_status.configure(text=" Saved locally", text_color="#4aff6b")
-                self.after(1000, self.show_list_view)
-            except Exception as e:
-                self.lbl_status.configure(text="Error saving to disk.", text_color="#ff4a4a")
-        else:
-            # Sync with cloud
-            try:
-                res = requests.post(f"{SERVER_URL}/api/sync", json={"user_id": self.current_user, "nonce_hex": nonce.hex(), "encrypted_data_hex": buffer.raw.hex()}, timeout=3)
-                if res.status_code == 200:
-                    self.lbl_status.configure(text=" Synced to cloud", text_color="#5cacee")
-                    self.after(1000, self.show_list_view)
-            except requests.exceptions.ConnectionError:
-                self.lbl_status.configure(text="Network error.", text_color="#ff4a4a")
-
-    def update_data(self, db_id, source):
-        service = self.entry_service.get()
-        username = self.entry_username.get()
-        password = self.entry_pass.get()
+        estado = "Cloud" if self.switch_var.get() == 1 else "Local"
         
-        if not service or not username or not password:
-            self.lbl_status.configure(text="Please fill all fields.", text_color="#ff4a4a")
-            return
-            
-        data = json.dumps({"service": service, "username": username, "password": password}).encode('utf-8')
-        length = len(data)
-        nonce = secrets.token_bytes(24) 
-        buffer = ctypes.create_string_buffer(length + 16)
-        
-        if self.core.cifrar_credencial(data, length, nonce, self.symmetric_key, buffer) != 0:
-            self.lbl_status.configure(text="Encryption error.", text_color="#ff4a4a")
-            return
+        connection = sqlite3.connect("vault_local.db")
+        cursor = connection.cursor()
+        cursor.execute("INSERT INTO local_credentials (user_id, nonce_hex, encrypted_data_hex, estado) VALUES (?, ?, ?, ?)",(self.current_user, nonce.hex(), buffer.raw.hex(), estado))
+        connection.commit()
+        connection.close()
 
-        if "Local" in source:
+        if estado == "Cloud":
             try:
-                connection = sqlite3.connect("vault_local.db")
-                cursor = connection.cursor()
-                cursor.execute("UPDATE local_credentials SET nonce_hex = ?, encrypted_data_hex = ? WHERE id = ?", (nonce.hex(), buffer.raw.hex(), db_id))
-                connection.commit()
-                connection.close()
-                self.lbl_status.configure(text=" Updated locally", text_color="#4aff6b")
-                self.after(1000, self.show_list_view)
-            except Exception as e:
-                self.lbl_status.configure(text="Error updating.", text_color="#ff4a4a")
-        else:
-            try:
-                res = requests.put(f"{SERVER_URL}/api/sync/{self.current_user}/{db_id}", json={"nonce_hex": nonce.hex(), "encrypted_data_hex": buffer.raw.hex()}, timeout=3)
-                if res.status_code == 200:
-                    self.lbl_status.configure(text=" Updated in cloud", text_color="#5cacee")
-                    self.after(1000, self.show_list_view)
-            except requests.exceptions.ConnectionError:
-                self.lbl_status.configure(text="Network error.", text_color="#ff4a4a")
+                requests.post(f"{SERVER_URL}/api/sync", json={"user_id": self.current_user, "nonce_hex": nonce.hex(), "encrypted_data_hex": buffer.raw.hex()}, timeout=3)
+            except Exception:
+                pass
+                
+        self.show_list_view()
 
     def exit_app(self):
         self.destroy()

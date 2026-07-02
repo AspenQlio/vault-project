@@ -15,7 +15,10 @@ if DATABASE_URL.startswith("postgres://"):
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
-
+class UpdateHashRequest(BaseModel):
+    username: str
+    old_auth_hash: str
+    new_auth_hash: str
 class UserDB(Base):
     __tablename__ = "users"
     id = Column(Integer, primary_key=True, index=True)
@@ -149,3 +152,18 @@ def update_credential(user_id: str, cred_id: int, payload: UpdatePayload, db: Se
     db.commit()
     print(f"\n[ Server] Credential {cred_id} updated for user: {user_id}")
     return {"status": "success"}
+
+@app.put("/api/update_hash")
+def update_hash(req: UpdateHashRequest, db: Session = Depends(get_db)):
+    # Buscamos al usuario en Neon
+    user = db.query(User).filter(User.username == req.username).first()
+    
+    # Verificamos que exista y que la contraseña antigua sea correcta
+    if not user or user.auth_hash != req.old_auth_hash:
+        raise HTTPException(status_code=401, detail="Credenciales incorrectas")
+    
+    # Actualizamos el hash y guardamos
+    user.auth_hash = req.new_auth_hash
+    db.commit()
+    
+    return {"message": "Contraseña maestra actualizada con éxito"}
