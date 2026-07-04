@@ -45,7 +45,7 @@ Ensure your system has the following components installed:
 ### Installation & Setup
 
 1.  **Clone the repository:**
-    `git clone https://github.com/yourusername/vault-project.git
+    `git clone https://github.com/AspenQlio/vault-project.git
     cd vault-project`
 
 2.  **Compile the Cryptographic Core Library:**
